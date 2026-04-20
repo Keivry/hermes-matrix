@@ -65,8 +65,8 @@ jobs:
             VERSION=$(echo "$INSPECT" | jq -r '.Labels["version"] // ""')
           fi
 
-          # Fallback: fetch all tags and pick the highest semantic version
-          # Note: ordering=last_updated (no leading -) sorts descending (newest first) on Docker Hub API
+          # Fallback: fetch all tags and pick the highest semantic version via numeric sort
+          # (Does not rely on API ordering; sorts by major.minor.patch numerically)
           if [ -z "$VERSION" ]; then
             VERSION=$(curl -s "https://hub.docker.com/v2/repositories/nousresearch/hermes-agent/tags?page_size=100" | \
               jq -r '[.results[] | select(.name | test("^v[0-9]")) | .name] |
@@ -83,6 +83,7 @@ jobs:
           echo "📦 Hermes-agent version: $VERSION"
 
       - name: Build & Push
+        id: build
         if: github.event_name != 'schedule' || steps.check.outputs.needs-update == 'true'
         uses: docker/build-push-action@v7
         with:
@@ -101,8 +102,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.check.outputs.needs-update }}" != "true" ]; then
             echo "ℹ️ No update needed this time."
-          else
+          elif [ "${{ steps.build.outcome }}" = "success" ]; then
             echo "🎉 Tags pushed:"
             echo "  ghcr.io/${{ env.OWNER }}/hermes-matrix:latest"
             echo "  ghcr.io/${{ env.OWNER }}/hermes-matrix:${{ env.BASE_VERSION }}"
+          else
+            echo "❌ Build & Push failed or was skipped."
           fi
