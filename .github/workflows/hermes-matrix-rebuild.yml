@@ -1,6 +1,10 @@
-name: Hermes Matrix Rebuild
+name: Hermes Matrix Build & Publish
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.matrix"
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -35,18 +39,20 @@ jobs:
 
       - name: Check base image update status
         id: check
+        if: github.event_name == 'schedule'
         uses: lucacome/docker-image-update-checker@v3
         with:
           base-image: nousresearch/hermes-agent:latest
           image: ghcr.io/${{ env.OWNER }}/hermes-matrix:latest
 
-      - name: Show check result (always visible)
+      - name: Show check result
+        if: github.event_name == 'schedule'
         run: |
           echo "🔍 Base image needs update: ${{ steps.check.outputs.needs-update }}"
           echo "Reason: ${{ steps.check.outputs.reason || 'N/A' }}"
 
       - name: Get hermes-agent version
-        if: steps.check.outputs.needs-update == 'true' || github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'schedule' || steps.check.outputs.needs-update == 'true'
         run: |
           # Inspect without pulling the full image
           INSPECT=$(skopeo inspect docker://nousresearch/hermes-agent:latest 2>/dev/null)
@@ -59,10 +65,13 @@ jobs:
             VERSION=$(echo "$INSPECT" | jq -r '.Labels["version"] // ""')
           fi
 
-          # Fallback: most recently updated non-latest tag from Docker Hub
+          # Fallback: fetch all tags and pick the highest semantic version
+          # Note: ordering=last_updated (no leading -) sorts descending (newest first) on Docker Hub API
           if [ -z "$VERSION" ]; then
-            VERSION=$(curl -s "https://hub.docker.com/v2/repositories/nousresearch/hermes-agent/tags?page_size=100&ordering=-last_updated" | \
-              jq -r '[.results[] | select(.name != "latest") | .name] | first // ""')
+            VERSION=$(curl -s "https://hub.docker.com/v2/repositories/nousresearch/hermes-agent/tags?page_size=100" | \
+              jq -r '[.results[] | select(.name | test("^v[0-9]")) | .name] |
+                     sort_by(split(".") | map(ltrimstr("v") | tonumber? // 0)) |
+                     last // ""')
           fi
 
           # Final fallback: date-based
@@ -73,8 +82,8 @@ jobs:
           echo "BASE_VERSION=$VERSION" >> $GITHUB_ENV
           echo "📦 Hermes-agent version: $VERSION"
 
-      - name: Build & Push if needed
-        if: steps.check.outputs.needs-update == 'true' || github.event_name == 'workflow_dispatch'
+      - name: Build & Push
+        if: github.event_name != 'schedule' || steps.check.outputs.needs-update == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -87,11 +96,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Final summary (always run)
+      - name: Final summary
         if: always()
         run: |
-          if [ "${{ steps.check.outputs.needs-update }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "🎉 Updated! Tags pushed: latest, ${{ env.BASE_VERSION }}"
-          else
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.check.outputs.needs-update }}" != "true" ]; then
             echo "ℹ️ No update needed this time."
+          else
+            echo "🎉 Tags pushed:"
+            echo "  ghcr.io/${{ env.OWNER }}/hermes-matrix:latest"
+            echo "  ghcr.io/${{ env.OWNER }}/hermes-matrix:${{ env.BASE_VERSION }}"
           fi
